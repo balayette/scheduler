@@ -1,0 +1,247 @@
+From f5f3a084e2683038dc74b154a830c90ce70ee1da Mon Sep 17 00:00:00 2001
+From: Nicolas Manichon <nmanichon@gmail.com>
+Date: Fri, 22 Jan 2021 15:14:22 +0100
+Subject: [PATCH 2/2] Debug prints
+
+---
+ kernel/fork.c        | 12 ++++++++++++
+ kernel/kthread.c     | 14 ++++++++++++++
+ kernel/sched/core.c  | 20 ++++++++++++++++++++
+ kernel/sched/sched.h |  1 +
+ kernel/workqueue.c   | 25 +++++++++++++++++++++++++
+ 5 files changed, 72 insertions(+)
+
+diff --git a/kernel/fork.c b/kernel/fork.c
+index 6d266388d380..98a282eb284c 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -105,6 +105,17 @@
+ 
+ #include <trace/events/sched.h>
+ 
++#define FE_DEBUG_FORK 0
++
++#if FE_DEBUG_FORK
++#define DBG(...)                                                               \
++	do {                                                                   \
++		pr_info(__VA_ARGS__);                                          \
++	} while (0)
++#else
++#define DBG(...)
++#endif
++
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/task.h>
+ 
+@@ -2477,6 +2488,7 @@ pid_t kernel_clone(struct kernel_clone_args *args)
+ 		get_task_struct(p);
+ 	}
+ 
++	DBG("wake_up_new_task(%d)\n", p->pid);
+ 	wake_up_new_task(p);
+ 
+ 	/* forking complete and child started to run, tell ptracer */
+diff --git a/kernel/kthread.c b/kernel/kthread.c
+index 69fe35f38e6a..2edba8702aae 100644
+--- a/kernel/kthread.c
++++ b/kernel/kthread.c
+@@ -30,6 +30,17 @@
+ #include <linux/sched/isolation.h>
+ #include <trace/events/sched.h>
+ 
++#define FE_DEBUG_KT 0
++
++#if FE_DEBUG_KT
++#define DBG(...)                                                               \
++	do {                                                                   \
++		pr_info(__VA_ARGS__);                                          \
++	} while (0)
++#else
++#define DBG(...)
++#endif
++
+ 
+ static DEFINE_SPINLOCK(kthread_create_lock);
+ static LIST_HEAD(kthread_create_list);
+@@ -348,6 +359,7 @@ struct task_struct *__kthread_create_on_node(int (*threadfn)(void *data),
+ 	list_add_tail(&create->list, &kthread_create_list);
+ 	spin_unlock(&kthread_create_lock);
+ 
++	DBG("kthreadd: wake_up_process(%d)\n", kthreadd_task->pid);
+ 	wake_up_process(kthreadd_task);
+ 	/*
+ 	 * Wait for completion in killable state, for I might be chosen by
+@@ -630,6 +642,8 @@ int kthreadd(void *unused)
+ 			list_del_init(&create->list);
+ 			spin_unlock(&kthread_create_lock);
+ 
++			DBG("Calling create_kthread(%px) (current: %d)\n",
++				create, current->pid);
+ 			create_kthread(create);
+ 
+ 			spin_lock(&kthread_create_lock);
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index 44df0dfc0eb6..b49cb18a443f 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -27,6 +27,17 @@
+ #include "pelt.h"
+ #include "smp.h"
+ 
++#define FE_DEBUG_CORE 0
++
++#if FE_DEBUG_CORE
++#define DBG(...)                                                               \
++	do {                                                                   \
++		pr_info(__VA_ARGS__);                                          \
++	} while (0)
++#else
++#define DBG(...)
++#endif
++
+ /*
+  * Export tracepoints that act as a bare tracehook (ie: have no trace event
+  * associated with them) to allow external modules to probe them.
+@@ -614,11 +625,15 @@ void resched_curr(struct rq *rq)
+ 	lockdep_assert_held(&rq->lock);
+ 
+ 	if (test_tsk_need_resched(curr))
++	{
++		DBG("Task is already marked TIF_NEED_RESCHED\n");
+ 		return;
++	}
+ 
+ 	cpu = cpu_of(rq);
+ 
+ 	if (cpu == smp_processor_id()) {
++		DBG("Marking task as TIF_NEED_RESCHED\n");
+ 		set_tsk_need_resched(curr);
+ 		set_preempt_need_resched();
+ 		return;
+@@ -4422,6 +4437,8 @@ static void __sched notrace __schedule(bool preempt)
+ 	struct rq *rq;
+ 	int cpu;
+ 
++	DBG("__schedule()\n");
++
+ 	cpu = smp_processor_id();
+ 	rq = cpu_rq(cpu);
+ 	prev = rq->curr;
+@@ -4503,6 +4520,8 @@ static void __sched notrace __schedule(bool preempt)
+ 	clear_tsk_need_resched(prev);
+ 	clear_preempt_need_resched();
+ 
++	DBG("SCHED SWITCH: %d -> %d\n", prev->pid, next->pid);
++
+ 	if (likely(prev != next)) {
+ 		rq->nr_switches++;
+ 		/*
+@@ -4606,6 +4625,7 @@ asmlinkage __visible void __sched schedule(void)
+ {
+ 	struct task_struct *tsk = current;
+ 
++	DBG("schedule()\n");
+ 	sched_submit_work(tsk);
+ 	do {
+ 		preempt_disable();
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+index e12b8207cb07..e66d36c33f7a 100644
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -778,6 +778,7 @@ struct perf_domain {
+ #define SG_OVERLOAD		0x1 /* More than one runnable task on a CPU. */
+ #define SG_OVERUTILIZED		0x2 /* One or more CPUs are over-utilized. */
+ 
++
+ /*
+  * We add the notion of a root-domain which will be used to define per-domain
+  * variables. Each exclusive cpuset essentially defines an island domain by
+diff --git a/kernel/workqueue.c b/kernel/workqueue.c
+index 437935e7a199..5c86f4223b26 100644
+--- a/kernel/workqueue.c
++++ b/kernel/workqueue.c
+@@ -25,6 +25,17 @@
+  * Please read Documentation/core-api/workqueue.rst for details.
+  */
+ 
++#define FE_DEBUG_WQ 0
++
++#if FE_DEBUG_WQ
++#define DBG(...)                                                               \
++	do {                                                                   \
++		pr_info(__VA_ARGS__);                                          \
++	} while (0)
++#else
++#define DBG(...)
++#endif
++
+ #include <linux/export.h>
+ #include <linux/kernel.h>
+ #include <linux/sched.h>
+@@ -1859,8 +1870,11 @@ static void worker_attach_to_pool(struct worker *worker,
+ 	if (pool->flags & POOL_DISASSOCIATED)
+ 		worker->flags |= WORKER_UNBOUND;
+ 
++	DBG("Attaching %px to pool %px\n", worker, pool);
+ 	list_add_tail(&worker->node, &pool->workers);
++	DBG("list_add_tail\n");
+ 	worker->pool = pool;
++	DBG("->pool done\n");
+ 
+ 	mutex_unlock(&wq_pool_attach_mutex);
+ }
+@@ -1921,6 +1935,8 @@ static struct worker *create_worker(struct worker_pool *pool)
+ 	if (!worker)
+ 		goto fail;
+ 
++	DBG("Created a worker at %px\n", worker);
++
+ 	worker->id = id;
+ 
+ 	if (pool->cpu >= 0)
+@@ -1929,6 +1945,7 @@ static struct worker *create_worker(struct worker_pool *pool)
+ 	else
+ 		snprintf(id_buf, sizeof(id_buf), "u%d:%d", pool->id, id);
+ 
++	DBG("Worker id: kworker/%s\n", id_buf);
+ 	worker->task = kthread_create_on_node(worker_thread, worker, pool->node,
+ 					      "kworker/%s", id_buf);
+ 	if (IS_ERR(worker->task))
+@@ -1937,8 +1954,11 @@ static struct worker *create_worker(struct worker_pool *pool)
+ 	set_user_nice(worker->task, pool->attrs->nice);
+ 	kthread_bind_mask(worker->task, pool->attrs->cpumask);
+ 
++	DBG("Attaching worker kworker/%s to pool %px\n", id_buf, pool);
+ 	/* successful, attach the worker to the pool */
+ 	worker_attach_to_pool(worker, pool);
++	DBG("worker_attach_to_pool(%px, %px) => %px\n", worker, pool,
++		worker->pool);
+ 
+ 	/* start the newly created worker */
+ 	raw_spin_lock_irq(&pool->lock);
+@@ -2362,10 +2382,13 @@ static int worker_thread(void *__worker)
+ 	struct worker *worker = __worker;
+ 	struct worker_pool *pool = worker->pool;
+ 
++	DBG("worker_thread(%px)\n", worker);
++
+ 	/* tell the scheduler that this is a workqueue worker */
+ 	set_pf_worker(true);
+ woke_up:
+ 	raw_spin_lock_irq(&pool->lock);
++	DBG("Locked: pool=%px worker->pool=%px lock=%px\n", pool, worker->pool, &pool->lock);
+ 
+ 	/* am I supposed to die? */
+ 	if (unlikely(worker->flags & WORKER_DIE)) {
+@@ -2380,6 +2403,8 @@ static int worker_thread(void *__worker)
+ 		return 0;
+ 	}
+ 
++	DBG("before worker_leave_idle: pool=%px worker->pool=%px", pool,
++		worker->pool);
+ 	worker_leave_idle(worker);
+ recheck:
+ 	/* no more worker necessary? */
+-- 
+2.30.0
+
