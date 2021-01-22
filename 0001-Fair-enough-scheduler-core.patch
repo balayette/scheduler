@@ -1,4 +1,4 @@
-From 6842a925bcd68741067818109383671f925a4701 Mon Sep 17 00:00:00 2001
+From c45b52cd363a996db0c23aa70439df48b225eca3 Mon Sep 17 00:00:00 2001
 From: Nicolas Manichon <nmanichon@gmail.com>
 Date: Fri, 22 Jan 2021 15:12:14 +0100
 Subject: [PATCH 1/2] Fair enough scheduler core
@@ -11,9 +11,9 @@ Subject: [PATCH 1/2] Fair enough scheduler core
  kernel/kthread.c                  |   2 +-
  kernel/sched/Makefile             |   2 +-
  kernel/sched/core.c               |  21 ++-
- kernel/sched/fair_enuf.c          | 218 ++++++++++++++++++++++++++++++
- kernel/sched/sched.h              |  18 ++-
- 9 files changed, 265 insertions(+), 10 deletions(-)
+ kernel/sched/fair_enuf.c          | 289 ++++++++++++++++++++++++++++++
+ kernel/sched/sched.h              |  18 +-
+ 9 files changed, 336 insertions(+), 10 deletions(-)
  create mode 100644 kernel/sched/fair_enuf.c
 
 diff --git a/include/asm-generic/vmlinux.lds.h b/include/asm-generic/vmlinux.lds.h
@@ -184,11 +184,17 @@ index e7e453492cff..44df0dfc0eb6 100644
  		rq->tmp_alone_branch = &rq->leaf_cfs_rq_list;
 diff --git a/kernel/sched/fair_enuf.c b/kernel/sched/fair_enuf.c
 new file mode 100644
-index 000000000000..213c8868a553
+index 000000000000..78b283ce7e04
 --- /dev/null
 +++ b/kernel/sched/fair_enuf.c
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,289 @@
 +#include "sched.h"
++
++static struct task_struct *list_to_task_struct(struct list_head *l)
++{
++	return container_of(list_entry(l, struct sched_fe_entity, list),
++			    struct task_struct, fe);
++}
 +
 +#define FE_DEBUG 0
 +
@@ -226,12 +232,6 @@ index 000000000000..213c8868a553
 +#define DBG(...)
 +#endif
 +
-+static struct task_struct *list_to_task_struct(struct list_head *l)
-+{
-+	return container_of(list_entry(l, struct sched_fe_entity, list),
-+			    struct task_struct, fe);
-+}
-+
 +static int task_in_rq(struct rq *rq, struct task_struct *task)
 +{
 +	struct list_head *curr;
@@ -244,12 +244,26 @@ index 000000000000..213c8868a553
 +	return 0;
 +}
 +
++/*
++ * Called by sched_init, _very_ early during kernel startup.
++ * Initialize the per-CPU runqueue.
++ */
 +void init_fe_rq(struct fe_rq *rq)
 +{
 +	rq->nr_running = 0;
 +	INIT_LIST_HEAD(&rq->entity_list);
 +}
 +
++/*
++ * Called when a task is ready to run.
++ * - When a task is created (wake_up_new_task -> activate_task)
++ * - When a task that was waiting, or blocked is now ready
++ * Add the task to the runqueue and increment the count of tasks that could run.
++ * Mark the task as ready (on_rq = 1)
++ *
++ * Quirks:
++ * - Can be called with p == rq->curr.
++ */
 +static void enq_task_fe(struct rq *rq, struct task_struct *p,
 +			int flags /* unused */)
 +{
@@ -257,7 +271,8 @@ index 000000000000..213c8868a553
 +
 +	DBG("enqueue(%d, %d) (prio: %d)\n", p->pid, flags, p->prio);
 +
-+	if (rq->curr != p && !task_in_rq(rq, p))
++	BUG_ON(task_in_rq(rq, p));
++	if (rq->curr != p)
 +		list_add_tail(&fe_it->list, &rq->fe.entity_list);
 +
 +	fe_it->on_rq = 1;
@@ -265,6 +280,12 @@ index 000000000000..213c8868a553
 +	add_nr_running(rq, 1);
 +}
 +
++/*
++ * Called when a task that was running/ready is now blocked or waiting.
++ * Remove the task from the runqueue and decrement the count of tasks that could
++ * run.
++ * Mark the task as blocked (on_rq = 0)
++ */
 +static void deq_task_fe(struct rq *rq, struct task_struct *task, int flags)
 +{
 +	DBG("deq_task_fe(%d, %d)\n", task->pid, flags);
@@ -282,21 +303,17 @@ index 000000000000..213c8868a553
 +	BUG();
 +}
 +
-+static void check_preempt_curr_fe(struct rq *rq, struct task_struct *p,
-+				  int flags /* unused */)
-+{
-+	DBG("check_preempt_curr(%d, %d) (prio: %d): current %d (prio: %d)\n",
-+	    p->pid, flags, p->prio, rq->curr->pid, rq->curr->prio);
-+
-+	if (p == rq->curr)
-+		return;
-+
-+	if (p->fe.on_rq && p->prio < rq->curr->prio) {
-+		DBG("  => Reschedule");
-+		resched_curr(rq);
-+	}
-+}
-+
++/*
++ * The core of the scheduler.
++ * Returns the task that should replace the task that is currently running.
++ * If we have nothing to schedule, return NULL.
++ * Can return the currently running task if it should keep running.
++ * Reset the tick counter for the task.
++ *
++ * Quirks:
++ * - The kernel might not always call put_prev_task after pick_next_task, so
++ * call put_prev_task.
++ */
 +struct task_struct *pick_next_task_fe(struct rq *rq)
 +{
 +	struct fe_rq *frq = &rq->fe;
@@ -308,6 +325,12 @@ index 000000000000..213c8868a553
 +	dump_rq(&frq->entity_list);
 +#endif
 +
++	/*
++	 * If we have nothing in the runqueue, but the current task is not
++	 * blocked, we can keep running the current task.
++	 * If the current task is blocked, then we have nothing to schedule,
++	 * and the current task must stop, so just return NULL.
++	 */
 +	if (list_empty(&frq->entity_list)) {
 +		if (current_task->on_rq) {
 +			DBG("nothing on the rq, current can continue\n");
@@ -319,7 +342,7 @@ index 000000000000..213c8868a553
 +	}
 +
 +	/*
-+	 * Remove the process at the head of the list, it will run now.
++	 * We run the process at the head of the queue (FIFO).
 +	 */
 +	next_task = list_to_task_struct(frq->entity_list.next);
 +	list_del_init(frq->entity_list.next);
@@ -329,15 +352,22 @@ index 000000000000..213c8868a553
 +
 +	next_task->fe.time = 100;
 +
-+	if (current_task->on_rq)
-+		put_prev_task(rq, current_task);
++	/*
++	 * put_prev_task will add the current task to the runqueue if it was
++	 * preempted.
++	 */
++	put_prev_task(rq, current_task);
 +
 +	return next_task;
 +}
 +
 +/*
-+ * We, or another scheduler, kicked one of our processes out, while it was
-+ * running. Add it to the runqueue if it could keep running
++ * Called when a task that was running is kicked out.
++ * This can be called by the scheduler or by pick_next_task.
++ *
++ * If the task is not blocked (on_rq = 1), then add it to the runqueue.
++ * This is necessary because we do not keep the currently running task in the
++ * runqueue.
 + */
 +static void put_prev_task_fe(struct rq *rq, struct task_struct *p)
 +{
@@ -347,11 +377,17 @@ index 000000000000..213c8868a553
 +	BUG_ON(task_in_rq(rq, p));
 +
 +	if (p->fe.on_rq) {
-+		DBG("The task wants to keep running, adding to the rq\n");
++		DBG("The task has been preempted, re add to the runqueue\n");
 +		list_add_tail(&p->fe.list, &rq->fe.entity_list);
 +	}
 +}
 +
++/*
++ * The scheduler might call this to replace the currenlty running task with p,
++ * without letting us choose (!= pick_next_task).
++ *
++ * We just remove the task from the runqueue.
++ */
 +static void set_next_task_fe(struct rq *rq /* unused */, struct task_struct *p,
 +			     bool first)
 +{
@@ -360,6 +396,11 @@ index 000000000000..213c8868a553
 +	list_del_init(&p->fe.list);
 +}
 +
++/*
++ * A tick that allows us to compute the time a task has been running.
++ * This makes it possible for us to ask the kernel to reschedule the current
++ * process if it has been running long enough.
++ */
 +static void task_tick_fe(struct rq *rq, struct task_struct *p, int queued)
 +{
 +	BUG_ON(rq->curr != p);
@@ -373,6 +414,36 @@ index 000000000000..213c8868a553
 +	}
 +}
 +
++/* Keep in mind that as task_struct->prio decreases, priority increases */
++
++/*
++ * Called when a process is ready to run.
++ * If the task has higher priority than the currently running task, ask
++ * the kernel to reschedule when possible.
++ */
++static void check_preempt_curr_fe(struct rq *rq, struct task_struct *p,
++				  int flags /* unused */)
++{
++	DBG("check_preempt_curr(%d, %d) (prio: %d): current %d (prio: %d)\n",
++	    p->pid, flags, p->prio, rq->curr->pid, rq->curr->prio);
++	BUG_ON(!p->fe.on_rq);
++
++	if (p == rq->curr)
++		return;
++
++	if (p->prio < rq->curr->prio) {
++		DBG("  => Reschedule");
++		resched_curr(rq);
++	}
++}
++
++/*
++ * Called when the priority of a task changes.
++ *
++ * This triggers a rescheduling if:
++ * - The task that changed priority is ready
++ * - The priority of the task increased
++ */
 +static void prio_changed_fe(struct rq *rq, struct task_struct *p, int oldprio)
 +{
 +	DBG("prio_changed_fe(%d) prio was %d, now %d\n", p->pid, oldprio,
