@@ -1,19 +1,19 @@
-From c45b52cd363a996db0c23aa70439df48b225eca3 Mon Sep 17 00:00:00 2001
+From a8b71cbeb446e5668267e7b7df96d40d982f2c4f Mon Sep 17 00:00:00 2001
 From: Nicolas Manichon <nmanichon@gmail.com>
 Date: Fri, 22 Jan 2021 15:12:14 +0100
 Subject: [PATCH 1/2] Fair enough scheduler core
 
 ---
  include/asm-generic/vmlinux.lds.h |   1 +
- include/linux/sched.h             |   7 +
+ include/linux/sched.h             |   6 +
  include/uapi/linux/sched.h        |   1 +
  init/init_task.c                  |   5 +-
  kernel/kthread.c                  |   2 +-
  kernel/sched/Makefile             |   2 +-
- kernel/sched/core.c               |  21 ++-
+ kernel/sched/core.c               |  20 ++-
  kernel/sched/fair_enuf.c          | 289 ++++++++++++++++++++++++++++++
  kernel/sched/sched.h              |  18 +-
- 9 files changed, 336 insertions(+), 10 deletions(-)
+ 9 files changed, 334 insertions(+), 10 deletions(-)
  create mode 100644 kernel/sched/fair_enuf.c
 
 diff --git a/include/asm-generic/vmlinux.lds.h b/include/asm-generic/vmlinux.lds.h
@@ -29,23 +29,22 @@ index b2b3d81b1535..444b57f26a85 100644
  	__end_sched_classes = .;
  
 diff --git a/include/linux/sched.h b/include/linux/sched.h
-index 76cd21fa5501..fe475be49e56 100644
+index 76cd21fa5501..4bfd07805040 100644
 --- a/include/linux/sched.h
 +++ b/include/linux/sched.h
-@@ -581,6 +581,12 @@ struct sched_dl_entity {
+@@ -581,6 +581,11 @@ struct sched_dl_entity {
  #endif
  };
  
 +struct sched_fe_entity {
 +	struct list_head list;
-+	int on_rq;
 +	int time;
 +};
 +
  #ifdef CONFIG_UCLAMP_TASK
  /* Number of utilization clamp buckets (shorter alias) */
  #define UCLAMP_BUCKETS CONFIG_UCLAMP_BUCKETS_COUNT
-@@ -695,6 +701,7 @@ struct task_struct {
+@@ -695,6 +700,7 @@ struct task_struct {
  	struct task_group		*sched_task_group;
  #endif
  	struct sched_dl_entity		dl;
@@ -115,21 +114,20 @@ index 5fc9c9b70862..3918fca13c6f 100644
  
  obj-$(CONFIG_SMP) += cpupri.o cpudeadline.o topology.o stop_task.o pelt.o
 diff --git a/kernel/sched/core.c b/kernel/sched/core.c
-index e7e453492cff..44df0dfc0eb6 100644
+index e7e453492cff..7852288548e9 100644
 --- a/kernel/sched/core.c
 +++ b/kernel/sched/core.c
-@@ -3093,6 +3093,10 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
+@@ -3093,6 +3093,9 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
  	p->rt.on_rq		= 0;
  	p->rt.on_list		= 0;
  
 +	INIT_LIST_HEAD(&p->fe.list);
-+	p->fe.on_rq		= 0;
 +	p->fe.time		= 100;
 +
  #ifdef CONFIG_PREEMPT_NOTIFIERS
  	INIT_HLIST_HEAD(&p->preempt_notifiers);
  #endif
-@@ -3245,7 +3249,7 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
+@@ -3245,7 +3248,7 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
  	 */
  	if (unlikely(p->sched_reset_on_fork)) {
  		if (task_has_dl_policy(p) || task_has_rt_policy(p)) {
@@ -138,7 +136,7 @@ index e7e453492cff..44df0dfc0eb6 100644
  			p->static_prio = NICE_TO_PRIO(0);
  			p->rt_priority = 0;
  		} else if (PRIO_TO_NICE(p->static_prio) < 0)
-@@ -3261,7 +3265,9 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
+@@ -3261,7 +3264,9 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
  		p->sched_reset_on_fork = 0;
  	}
  
@@ -149,7 +147,7 @@ index e7e453492cff..44df0dfc0eb6 100644
  		return -EAGAIN;
  	else if (rt_prio(p->prio))
  		p->sched_class = &rt_sched_class;
-@@ -4339,10 +4345,10 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
+@@ -4339,10 +4344,10 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
  	 * higher scheduling class, because otherwise those loose the
  	 * opportunity to pull in more work from other CPUs.
  	 */
@@ -163,7 +161,7 @@ index e7e453492cff..44df0dfc0eb6 100644
  		if (unlikely(p == RETRY_TASK))
  			goto restart;
  
-@@ -5186,7 +5192,9 @@ static void __setscheduler(struct rq *rq, struct task_struct *p,
+@@ -5186,7 +5191,9 @@ static void __setscheduler(struct rq *rq, struct task_struct *p,
  	if (keep_boost)
  		p->prio = rt_effective_prio(p, p->prio);
  
@@ -174,7 +172,7 @@ index e7e453492cff..44df0dfc0eb6 100644
  		p->sched_class = &dl_sched_class;
  	else if (rt_prio(p->prio))
  		p->sched_class = &rt_sched_class;
-@@ -7144,6 +7152,7 @@ void __init sched_init(void)
+@@ -7144,6 +7151,7 @@ void __init sched_init(void)
  		init_cfs_rq(&rq->cfs);
  		init_rt_rq(&rq->rt);
  		init_dl_rq(&rq->dl);
@@ -184,7 +182,7 @@ index e7e453492cff..44df0dfc0eb6 100644
  		rq->tmp_alone_branch = &rq->leaf_cfs_rq_list;
 diff --git a/kernel/sched/fair_enuf.c b/kernel/sched/fair_enuf.c
 new file mode 100644
-index 000000000000..78b283ce7e04
+index 000000000000..631e6eab5a34
 --- /dev/null
 +++ b/kernel/sched/fair_enuf.c
 @@ -0,0 +1,289 @@
@@ -275,7 +273,7 @@ index 000000000000..78b283ce7e04
 +	if (rq->curr != p)
 +		list_add_tail(&fe_it->list, &rq->fe.entity_list);
 +
-+	fe_it->on_rq = 1;
++	p->on_rq = 1;
 +	rq->fe.nr_running += 1;
 +	add_nr_running(rq, 1);
 +}
@@ -295,7 +293,7 @@ index 000000000000..78b283ce7e04
 +
 +	rq->fe.nr_running -= 1;
 +	sub_nr_running(rq, 1);
-+	task->fe.on_rq = 0;
++	task->on_rq = 0;
 +}
 +
 +static void yield_task_fe(struct rq *rq /* unused */)
@@ -376,7 +374,7 @@ index 000000000000..78b283ce7e04
 +
 +	BUG_ON(task_in_rq(rq, p));
 +
-+	if (p->fe.on_rq) {
++	if (p->on_rq) {
 +		DBG("The task has been preempted, re add to the runqueue\n");
 +		list_add_tail(&p->fe.list, &rq->fe.entity_list);
 +	}
@@ -426,7 +424,7 @@ index 000000000000..78b283ce7e04
 +{
 +	DBG("check_preempt_curr(%d, %d) (prio: %d): current %d (prio: %d)\n",
 +	    p->pid, flags, p->prio, rq->curr->pid, rq->curr->prio);
-+	BUG_ON(!p->fe.on_rq);
++	BUG_ON(!p->on_rq);
 +
 +	if (p == rq->curr)
 +		return;
@@ -449,7 +447,7 @@ index 000000000000..78b283ce7e04
 +	DBG("prio_changed_fe(%d) prio was %d, now %d\n", p->pid, oldprio,
 +	    p->prio);
 +
-+	if (p->fe.on_rq && p->prio < oldprio) {
++	if (p->on_rq && p->prio < oldprio) {
 +		DBG("  => Reschedule");
 +		resched_curr(rq);
 +	}

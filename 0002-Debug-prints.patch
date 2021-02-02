@@ -1,4 +1,4 @@
-From 97102e414b299442106ecb67cdbeb45f8174497f Mon Sep 17 00:00:00 2001
+From 0c62efc62474de40e90ae0eb3a09d599be2a6744 Mon Sep 17 00:00:00 2001
 From: Nicolas Manichon <nmanichon@gmail.com>
 Date: Fri, 22 Jan 2021 15:14:22 +0100
 Subject: [PATCH 2/2] Debug prints
@@ -81,7 +81,7 @@ index 69fe35f38e6a..2edba8702aae 100644
  
  			spin_lock(&kthread_create_lock);
 diff --git a/kernel/sched/core.c b/kernel/sched/core.c
-index 44df0dfc0eb6..b49cb18a443f 100644
+index 7852288548e9..1905779038b9 100644
 --- a/kernel/sched/core.c
 +++ b/kernel/sched/core.c
 @@ -27,6 +27,17 @@
@@ -118,7 +118,7 @@ index 44df0dfc0eb6..b49cb18a443f 100644
  		set_tsk_need_resched(curr);
  		set_preempt_need_resched();
  		return;
-@@ -4422,6 +4437,8 @@ static void __sched notrace __schedule(bool preempt)
+@@ -4421,6 +4436,8 @@ static void __sched notrace __schedule(bool preempt)
  	struct rq *rq;
  	int cpu;
  
@@ -127,7 +127,7 @@ index 44df0dfc0eb6..b49cb18a443f 100644
  	cpu = smp_processor_id();
  	rq = cpu_rq(cpu);
  	prev = rq->curr;
-@@ -4503,6 +4520,8 @@ static void __sched notrace __schedule(bool preempt)
+@@ -4502,6 +4519,8 @@ static void __sched notrace __schedule(bool preempt)
  	clear_tsk_need_resched(prev);
  	clear_preempt_need_resched();
  
@@ -136,7 +136,7 @@ index 44df0dfc0eb6..b49cb18a443f 100644
  	if (likely(prev != next)) {
  		rq->nr_switches++;
  		/*
-@@ -4606,6 +4625,7 @@ asmlinkage __visible void __sched schedule(void)
+@@ -4605,6 +4624,7 @@ asmlinkage __visible void __sched schedule(void)
  {
  	struct task_struct *tsk = current;
  
