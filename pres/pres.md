@@ -215,23 +215,39 @@ ask the kernel to reschedule.
 ## Scheduler entity
 
 ```diff
---- a/include/linux/sched.h
-+++ b/include/linux/sched.h
-@@ -581,6 +581,11 @@ struct sched_dl_entity {
+@@ -581,6 +581,11
 +struct sched_fe_entity {
 +	struct list_head list;
 +	int time;
 +};
 ```
 
-`sched_fe_entity` contains a list node (`prev` and `next` point to other
+`sched_fe_entity` is a runqueue node (`prev` and `next` point to other
 tasks in the runqueue).
-The `time` field is incremented during each call of `task_tick`.
+
+The `time` field is initialized to the time slice chosen by the scheduler when
+the task starts running, and then decremented at each call of `task_tick`.
 
 ```diff
 @@ -695,6 +700,7 @@ struct task_struct {
  	struct sched_dl_entity		dl;
 +	struct sched_fe_entity		fe;
+```
+
+## Runqueue
+
+```diff
++struct fe_rq {
++	size_t nr_running;
++	struct list_head entity_list;
++};
++
+
+@@ -931,6 +942,7 @@ struct rq {
+ 	struct cfs_rq		cfs;
+ 	struct rt_rq		rt;
+ 	struct dl_rq		dl;
++	struct fe_rq		fe;
 ```
 
 ## Remove `SCHED_NORMAL`
@@ -282,7 +298,8 @@ Add a call to our initialization routine.
 
 ## ???
 
-* The only documentation is the code, and nobody agrees on the internet.
+* Nobody agrees on the internet, everything is outdated
+* The only documentation is the code
 * We had to discover basically everything we explained earlier
 * Debugging a scheduler is not easy
 * When your scheduler is broken, everything looks like a race condition
